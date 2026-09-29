@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yaml
 
 from .models import Finding
-from .profiler import normalize_values, signature_to_regex
+from .profiler import normalize_columns, normalize_values, signature_to_regex
 
 RULE_TYPES = ("not_null", "null_pct_max", "unique", "range", "allowed_values", "regex")
 STATUSES = ("proposed", "active", "muted")
@@ -70,13 +71,22 @@ def generate_rules(profile: dict[str, Any]) -> list[dict[str, Any]]:
         # numeric range (skipped for keys: sequential ids legitimately grow every batch)
         if ltype in ("integer", "float") and "min" in c and not is_key(c):
             lo, hi = c["min"], c["max"]
-            pad = max((hi - lo) * 0.1, c.get("std", 0.0)) or abs(hi) * 0.1 or 1.0
-            new_lo = 0.0 if lo >= 0 else lo - pad  # keep non-negative columns non-negative
-            params = {"min": _round(new_lo, ltype, down=True), "max": _round(hi + pad, ltype, down=False)}
+            with np.errstate(over="ignore"):
+                pad = max((hi - lo) * 0.1, c.get("std") or 0.0) or abs(hi) * 0.1 or 1.0
+                new_lo = 0.0 if lo >= 0 else lo - pad  # keep non-negative columns non-negative
+                new_hi = hi + pad
+            if not (math.isfinite(new_lo) and math.isfinite(new_hi)):
+                continue  # values near float limits: a range rule would be meaningless
+            params = {"min": _round(new_lo, ltype, down=True), "max": _round(new_hi, ltype, down=False)}
             # continuous measures have long tails: tolerate a few new extremes
             mostly = 1.0 if ltype == "integer" else 0.995
             rules.append(make_rule("range", name, params, mostly=mostly, confidence=conf,
                                    description=f"Observed range [{lo:g}, {hi:g}] + margin"))
+            if lo >= 0 and mostly < 1.0:
+                # the tolerant range above must not let a handful of negative values slip through
+                rule = make_rule("range", name, {"min": 0.0}, confidence=conf, description="Never negative")
+                rule["id"] = f"{name}.non_negative"
+                rules.append(rule)
 
         # categorical domain
         low_card = c["distinct_count"] <= MAX_ALLOWED_VALUES and nn >= 5 * c["distinct_count"]
@@ -183,6 +193,7 @@ def _failing_mask(s: pd.Series, rule: dict[str, Any]) -> pd.Series:
 
 
 def evaluate_rules(df: pd.DataFrame, rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    df = normalize_columns(df)
     results = []
     for rule in rules:
         if rule.get("status") == "muted":
@@ -246,14 +257,25 @@ def save_rules(path: str | Path, dataset: str, rules: list[dict[str, Any]]) -> N
 
 
 def load_rules(path: str | Path) -> list[dict[str, Any]]:
-    doc = yaml.safe_load(Path(path).read_text()) or {}
-    rules = doc.get("rules", [])
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"rules file not found: {path}")
+    try:
+        doc = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"{path} is not valid YAML: {e}") from e
+    rules = doc.get("rules", []) if isinstance(doc, dict) else None
+    if not isinstance(rules, list) or not all(isinstance(r, dict) for r in rules):
+        raise ValueError(f"{path}: expected a mapping with a 'rules' list")
     for r in rules:
         r.setdefault("params", {})
         r.setdefault("status", "proposed")
         r.setdefault("mostly", 1.0)
         r.setdefault("id", f"{r.get('column')}.{r.get('type')}")
-        validate_rule(r)
+        try:
+            validate_rule(r)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"{path}: rule {r.get('id')!r}: {e}") from e
     return rules
 
 

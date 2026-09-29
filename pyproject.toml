@@ -27,6 +27,8 @@ include = ["dqa*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# numeric warnings (overflow, NaN arithmetic) and mixed-type CSV reads are bugs here
+filterwarnings = ["error::RuntimeWarning", "error::pandas.errors.DtypeWarning"]
 
 [tool.ruff]
 line-length = 120

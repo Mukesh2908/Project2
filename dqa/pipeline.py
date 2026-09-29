@@ -14,7 +14,7 @@ from .anomaly import metric_anomalies, record_outliers
 from .drift import detect_drift
 from .loader import dataset_name_for, load_file
 from .models import Finding, count_by_severity, sort_findings
-from .profiler import profile_dataframe
+from .profiler import normalize_columns, profile_dataframe
 from .rules import evaluate_rules, generate_rules, load_rules, merge_rules, results_to_findings, save_rules
 from .store import Store
 
@@ -76,7 +76,7 @@ def run_batch(
 ) -> RunResult:
     store = store or Store()
     dataset = dataset or dataset_name_for(path)
-    df = load_file(path) if df is None else df
+    df = load_file(path) if df is None else normalize_columns(df)
     profile = profile_dataframe(df, dataset, str(path))
     history = store.history(dataset)
     baseline = history[-1] if history else None

@@ -95,4 +95,16 @@ deterministic engine, never by the LLM.
 pytest -q && ruff check .
 ```
 
+The test suite goes well beyond unit tests:
+
+| Suite | What it proves |
+|---|---|
+| `test_statistical.py` | Over 5 seeds × 6 daily batches: **zero** warnings on clean data, and each of 18 injected faults (duplicate keys, a single null, 1% negatives, renamed/dropped/added columns, type change, row loss, format change, distribution shifts, …) is detected |
+| `test_edge_cases.py` | 30+ pathological frames (empty, all-null, ±inf, 1e308, 2⁶³, duplicate/numeric/blank column names, nested JSON, tz datetimes, unicode, HTML injection) never crash, produce strict JSON, and a repeated batch raises no alarms |
+| `test_fuzz.py` | Random schemas, types and schema drift across batches, both in memory and via CSV files |
+| `test_loader.py` | All formats, `;`/`|` delimiters, BOM, Latin-1, mixed types in large CSVs, corrupt files and rules → clean errors (exit code 2) |
+
+Numeric `RuntimeWarning`s and pandas `DtypeWarning`s are turned into test failures.
+Performance: a 38 MB / 500k-row CSV is profiled and checked in ~3 s.
+
 See [docs/PLAN.md](docs/PLAN.md) for the design and roadmap.

@@ -51,7 +51,8 @@ def normalize_values(s: pd.Series) -> pd.Series:
     if pd.api.types.is_bool_dtype(s):
         return s.astype(str)
     if pd.api.types.is_numeric_dtype(s):
-        if len(s) and bool(np.all(np.mod(s, 1) == 0)):
+        if len(s) and bool(np.all(np.isfinite(s))) and bool(np.all(np.mod(s, 1) == 0)) \
+                and bool(np.all(np.abs(s) < 2**63)):
             return s.astype("int64").astype(str)
         return s.astype(str)
     return s.astype(str).str.strip()
@@ -79,7 +80,8 @@ def infer_type(s: pd.Series) -> str:
     if pd.api.types.is_integer_dtype(s):
         return "integer"
     if pd.api.types.is_float_dtype(s):
-        return "integer" if len(nn) and bool(np.all(np.mod(nn, 1) == 0)) else "float"
+        fin = nn[np.isfinite(nn)]
+        return "integer" if len(fin) == len(nn) and len(fin) and bool(np.all(np.mod(fin, 1) == 0)) else "float"
     if nn.empty:
         return "empty"
     sample = nn.astype(str).head(SAMPLE)
@@ -89,7 +91,31 @@ def infer_type(s: pd.Series) -> str:
 
 
 def numeric_values(s: pd.Series) -> np.ndarray:
-    return pd.to_numeric(s, errors="coerce").dropna().to_numpy(dtype=float)
+    """Finite numeric values of `s` (text, NaN and ±inf dropped)."""
+    vals = pd.to_numeric(s, errors="coerce").dropna().to_numpy(dtype=float)
+    return vals[np.isfinite(vals)]
+
+
+def finite_or_none(x: float) -> float | None:
+    x = float(x)
+    return x if np.isfinite(x) else None
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """String, non-empty, unique column names (duplicates become name.1, name.2 like read_csv)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for c in df.columns:
+        base = str(c).strip() or "unnamed"
+        name, i = base, 0
+        while name in seen:
+            i += 1
+            name = f"{base}.{i}"
+        seen.add(name)
+        names.append(name)
+    if names == list(df.columns):
+        return df
+    return df.set_axis(names, axis=1)
 
 
 # ---------------------------------------------------------------- profiling
@@ -120,13 +146,16 @@ def profile_column(s: pd.Series) -> dict[str, Any]:
 
     if ltype in ("integer", "float"):
         vals = numeric_values(nn)
+        col["inf_count"] = int(np.isinf(pd.to_numeric(nn, errors="coerce").to_numpy(dtype=float)).sum())
         if len(vals):
             q = np.quantile(vals, [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99])
+            with np.errstate(over="ignore", invalid="ignore"):
+                mean, std = vals.mean(), vals.std(ddof=0)
             col.update(
                 min=float(vals.min()),
                 max=float(vals.max()),
-                mean=float(vals.mean()),
-                std=float(vals.std(ddof=0)),
+                mean=finite_or_none(mean),
+                std=finite_or_none(std),
                 quantiles=dict(zip(["p01", "p05", "p25", "p50", "p75", "p95", "p99"], map(float, q))),
                 negative_count=int((vals < 0).sum()),
                 zero_count=int((vals == 0).sum()),
@@ -158,6 +187,7 @@ def profile_column(s: pd.Series) -> dict[str, Any]:
 
 
 def profile_dataframe(df: pd.DataFrame, dataset: str, source: str | None = None) -> dict[str, Any]:
+    df = normalize_columns(df)
     columns = [profile_column(df[c]) for c in df.columns]
     rows = len(df)
     try:

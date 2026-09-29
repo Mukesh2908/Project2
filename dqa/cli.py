@@ -41,8 +41,11 @@ def cmd_run(a: argparse.Namespace) -> int:
     print(f"{r.dataset}: {r.verdict}  ({c['error']} errors, {c['warning']} warnings, {c['info']} info)"
           f"  rows={r.profile['row_count']:,}  history={r.history_size}  llm={'on' if r.llm_used else 'off'}")
     if not r.baseline_run_id:
-        print(f"  first batch — baseline stored, {r.new_rules} rules proposed in {r.rules_path}")
-        print("  review them, then `dqa approve " + r.dataset + "` to make failures blocking")
+        if r.new_rules:
+            print(f"  first batch — baseline stored, {r.new_rules} rules proposed in {r.rules_path}")
+            print("  review them, then `dqa approve " + r.dataset + "` to make failures blocking")
+        else:
+            print("  first batch — baseline stored (no rules could be derived from it)")
     elif r.new_rules:
         print(f"  {r.new_rules} new rule(s) proposed for new columns in {r.rules_path}")
     _print_findings(r.findings)

@@ -8,11 +8,14 @@ import numpy as np
 import pandas as pd
 
 from .models import Finding
+from .profiler import normalize_columns
 
 MIN_HISTORY = 3
 Z_THRESHOLD = 3.5
 IQR_K = 3.0
 REL_TOLERANCE = 0.02  # changes under ~2% of the median are never anomalous
+# batch sizes legitimately vary a lot more than column statistics do
+REL_TOLERANCE_BY_METRIC = {"row_count": 0.10}
 
 
 def _abs_floor(metric: str) -> float:
@@ -34,7 +37,7 @@ def dataset_metrics(profile: dict[str, Any]) -> dict[str, float]:
         m[f"{n}.null_pct"] = c["null_pct"]
         if c["distinct_count"] <= 50 and not c["is_unique"]:
             m[f"{n}.distinct_count"] = float(c["distinct_count"])
-        if "mean" in c and not (c["is_unique"] and c["type"] == "integer"):
+        if c.get("mean") is not None and not (c["is_unique"] and c["type"] == "integer"):
             m[f"{n}.mean"] = c["mean"]
         if "mean_length" in c:
             m[f"{n}.mean_length"] = c["mean_length"]
@@ -55,7 +58,7 @@ def metric_anomalies(history: list[dict[str, Any]], current: dict[str, Any],
         med = float(np.median(series))
         mad = float(np.median(np.abs(series - med)))
         # floor the scale so tiny, stable histories don't turn noise into anomalies
-        scale = max(1.4826 * mad, abs(med) * REL_TOLERANCE, _abs_floor(metric))
+        scale = max(1.4826 * mad, abs(med) * REL_TOLERANCE_BY_METRIC.get(metric, REL_TOLERANCE), _abs_floor(metric))
         z = (value - med) / scale
         if abs(z) <= threshold:
             continue
@@ -74,11 +77,12 @@ def metric_anomalies(history: list[dict[str, Any]], current: dict[str, Any],
 def record_outliers(df: pd.DataFrame, profile: dict[str, Any], k: float = IQR_K) -> list[Finding]:
     """Values outside Q1 - k*IQR .. Q3 + k*IQR for each numeric column."""
     findings = []
+    df = normalize_columns(df)
     for c in profile["columns"]:
         if c["type"] not in ("integer", "float") or c["is_unique"] or c["name"] not in df.columns:
             continue
         vals = pd.to_numeric(df[c["name"]], errors="coerce")
-        clean = vals.dropna()
+        clean = vals[np.isfinite(vals)]
         if len(clean) < 20:
             continue
         q1, q3 = np.quantile(clean, [0.25, 0.75])
@@ -97,7 +101,7 @@ def record_outliers(df: pd.DataFrame, profile: dict[str, Any], k: float = IQR_K)
             detail=f"{count} value(s) ({share:.2%}) outside [{_fmt(lo)}, {_fmt(hi)}]",
             evidence={"count": count, "share": round(share, 6), "lower": lo, "upper": hi,
                       "sample_rows": [int(i) if isinstance(i, (int, np.integer)) else str(i) for i in rows.index[:5]],
-                      "sample_values": [float(v) for v in rows.head(5)]},
+                      "sample_values": [float(v) if np.isfinite(v) else str(v) for v in rows.head(5)]},
         ))
     return findings
 

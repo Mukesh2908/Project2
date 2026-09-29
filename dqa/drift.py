@@ -9,7 +9,7 @@ import pandas as pd
 
 from .models import Finding
 from .rules import is_key
-from .profiler import TOP_K, bin_fractions, column_map, normalize_values, numeric_values
+from .profiler import TOP_K, bin_fractions, column_map, normalize_columns, normalize_values, numeric_values
 
 PSI_WARN = 0.25
 PSI_INFO = 0.1
@@ -27,9 +27,10 @@ def _similar(a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Heuristic: could column b be column a under a new name?"""
     if a["type"] != b["type"]:
         return False
-    if "mean" in a and "mean" in b:
-        scale = max(abs(a["mean"]), abs(a.get("std", 0)), 1e-9)
-        return abs(a["mean"] - b["mean"]) / scale < 0.05 and abs(a.get("std", 0) - b.get("std", 0)) / scale < 0.1
+    if a.get("mean") is not None and b.get("mean") is not None:
+        sa, sb = a.get("std") or 0.0, b.get("std") or 0.0
+        scale = max(abs(a["mean"]), sa, 1e-9)
+        return abs(a["mean"] - b["mean"]) / scale < 0.05 and abs(sa - sb) / scale < 0.1
     va = {v["value"] for v in a["top_values"]}
     vb = {v["value"] for v in b["top_values"]}
     if a["distinct_count"] <= TOP_K and va and vb:
@@ -92,6 +93,7 @@ def schema_drift(baseline: dict[str, Any], current: dict[str, Any]) -> list[Find
 
 def distribution_drift(baseline: dict[str, Any], df: pd.DataFrame) -> list[Finding]:
     findings: list[Finding] = []
+    df = normalize_columns(df)
     for b in baseline["columns"]:
         name = b["name"]
         if name not in df.columns:
@@ -105,7 +107,7 @@ def distribution_drift(baseline: dict[str, Any], df: pd.DataFrame) -> list[Findi
             if len(vals):
                 score = psi(b["bins"]["fractions"], bin_fractions(vals, b["bins"]["edges"]))
                 _add_psi(findings, name, score, "numeric", {
-                    "baseline_mean": b.get("mean"), "current_mean": float(vals.mean()),
+                    "baseline_mean": b.get("mean"), "current_mean": _mean(vals),
                     "baseline_p50": b.get("quantiles", {}).get("p50"), "current_p50": float(np.median(vals)),
                 })
             continue
@@ -133,6 +135,12 @@ def distribution_drift(baseline: dict[str, Any], df: pd.DataFrame) -> list[Findi
                         evidence={"new_values": {str(k): round(float(v), 6) for k, v in unseen.head(10).items()}},
                     ))
     return findings
+
+
+def _mean(vals: np.ndarray) -> float | None:
+    with np.errstate(over="ignore", invalid="ignore"):
+        m = float(vals.mean())
+    return m if np.isfinite(m) else None
 
 
 def _add_psi(findings: list[Finding], name: str, score: float, kind: str, extra: dict) -> None:
